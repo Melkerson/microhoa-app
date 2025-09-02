@@ -142,8 +142,6 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script type="module">
     import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.mjs";
-
-    //  Fix: Use a real module worker instead of workerSrc
     pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(
       "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.worker.mjs",
       { type: "module" }
@@ -155,8 +153,6 @@
     const chargeNameInput = $("chargeName");
     chargeNameInput.value = localStorage.getItem("mh_charge_name") || "Water Billing";
     $("year").textContent = new Date().getFullYear();
-
-    const currency = (n) => n.toLocaleString(undefined, { style: "currency", currency: "USD" });
 
     const parseUsDate = (s) => {
       const m1 = s.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
@@ -182,18 +178,18 @@
       r.onerror = rej;
       r.readAsArrayBuffer(f);
     });
-   const fileToText = (f) => new Promise((res, rej) => {
-  const r = new FileReader();
-  r.onload = () => res(r.result);
-  r.onerror = rej;
-  r.readAsText(f);
-});
+    const fileToText = (f) => new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = rej;
+      r.readAsText(f);
+    });
 
     const normalizeMoney = (s) => Number(String(s).replace(/[^\d.-]/g, "")) || 0;
-    const byNumericUnitOrder = (a,b) => {
+    const byNumericUnitOrder = (a, b) => {
       const na = Number(String(a).replace(/\D/g, ""));
       const nb = Number(String(b).replace(/\D/g, ""));
-      if (!isNaN(na) && !isNaN(nb)) return na-nb;
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
       return String(a).localeCompare(String(b));
     };
     const streetNumber = (addr) => {
@@ -209,12 +205,12 @@
       for (let p = 1; p <= doc.numPages; p++) {
         const page = await doc.getPage(p);
         const content = await page.getTextContent();
-        text += "\n" + content.items.map((it) => (it.str || "")).join("\n");
+        text += "\n" + content.items.map((it) => it.str || "").join("\n");
       }
       const t = text.replace(/\u00A0/g, " ");
       const findMoney = (label) => {
         const m = t.match(new RegExp(label.source + `[":\\s-]*\\$?\\s*([\\n\\r\\t\\s$,\\d.-]+)`, "i"));
-        return m ? normalizeMoney(m[1]) : 0;
+        return m ? Number(String(m[1]).replace(/[^\d.-]/g, "")) : 0;
       };
       const water = findMoney(/\bWater\b/);
       const sewer = findMoney(/\bSewer\b/);
@@ -229,43 +225,367 @@
         const m = t.match(new RegExp(label.source + `[\\"\\s:]*([^\\n\\r]+)`, "i"));
         return m ? parseUsDate(m[1].trim()) : undefined;
       };
-
       const billingStart = dateAfter(/Billing\s*Start/);
       const billingEnd = dateAfter(/Billing\s*End/);
       const billDate = dateAfter(/Bill\s*Date/);
       const dueDate = dateAfter(/Due\s*Date/);
 
-      return { billingStart, billingEnd, billDate, dueDate, totals: { water, sewer, stormwater, base, superfund }, rawText: t };
+      return {
+        billingStart,
+        billingEnd,
+        billDate,
+        dueDate,
+        totals: { water, sewer, stormwater, base, superfund },
+        rawText: t,
+      };
     }
 
     function parseUsageCSV(text) {
       const { data, meta } = Papa.parse(text, { header: true, skipEmptyLines: true });
       const rows = data;
-      const headers = (meta.fields || []).map((h) => String(h||""));
-      const unitCol = headers.find((h) => /^(unit|unit_no|unit number|unit#)$/i.test(h)) || headers.find((h) => /unit/i.test(h)) || headers[0];
-      const usageCol = headers.find((h) => /^(meter\s*usage|usage|consumption|ccf|gallons)$/i.test(h)) || headers.find((h) => /usage|consumption|ccf|gallon/i.test(h)) || headers[1];
-      return rows.map((r) => ({ unit: String(r[unitCol] ?? "").trim(), usage: String(r[usageCol] ?? "").trim() === "" ? 0 : Number(String(r[usageCol]).replace(/[^\d.\-]/g, "")) || 0 })).filter((r) => r.unit !== "");
+      const headers = (meta.fields || []).map((h) => String(h || ""));
+      const unitCol =
+        headers.find((h) => /^(unit|unit_no|unit number|unit#)$/i.test(h)) ||
+        headers.find((h) => /unit/i.test(h)) ||
+        headers[0];
+      const usageCol =
+        headers.find((h) => /^(meter\s*usage|usage|consumption|ccf|gallons)$/i.test(h)) ||
+        headers.find((h) => /usage|consumption|ccf|gallon/i.test(h)) ||
+        headers[1];
+      return rows
+        .map((r) => ({
+          unit: String(r[unitCol] ?? "").trim(),
+          usage:
+            String(r[usageCol] ?? "").trim() === ""
+              ? 0
+              : Number(String(r[usageCol]).replace(/[^\d.\-]/g, "")) || 0,
+        }))
+        .filter((r) => r.unit !== "");
     }
 
     function parseOwnerExport(text) {
       const { data, meta } = Papa.parse(text, { header: true, skipEmptyLines: true });
       const rows = data;
-      const headers = (meta.fields || []).map((h) => String(h||""));
-      const unitCol = headers.find((h) => /^(unit|unit_no|unit number|unit#)$/i.test(h)) || headers.find((h) => /unit/i.test(h));
-      const accountCol = headers.find((h) => /^account$/i.test(h)) || headers.find((h) => /account/i.test(h));
-      const addressCol = headers.find((h) => /^address$/i.test(h)) || headers.find((h) => /address/i.test(h));
-      return rows.map((r) => ({ unit: r[unitCol ?? "unit"] ? String(r[unitCol ?? "unit"]).trim() : undefined, account: r[accountCol ?? "account"] ? String(r[accountCol ?? "account"]).trim() : undefined, address: r[addressCol ?? "address"] ? String(r[addressCol ?? "address"]).trim() : undefined }));
+      const headers = (meta.fields || []).map((h) => String(h || ""));
+      const unitCol =
+        headers.find((h) => /^(unit|unit_no|unit number|unit#)$/i.test(h)) ||
+        headers.find((h) => /unit/i.test(h));
+      const accountCol =
+        headers.find((h) => /^account$/i.test(h)) || headers.find((h) => /account/i.test(h));
+      const addressCol =
+        headers.find((h) => /^address$/i.test(h)) || headers.find((h) => /address/i.test(h));
+      return rows.map((r) => ({
+        unit: r[unitCol] ? String(r[unitCol]).trim() : undefined,
+        account: r[accountCol] ? String(r[accountCol]).trim() : undefined,
+        address: r[addressCol] ? String(r[addressCol]).trim() : undefined,
+      }));
     }
 
     function allocate(bill, usageRows, ownerRows) {
-      const normUnit = (u) => { const n = String(u).match(/\\d+/)?.[0]; return n ? n : String(u).trim(); };
-      const unitsSet = new Set(); usageRows.forEach((r) => unitsSet.add(normUnit(r.unit)));
-      const unitToAccount = new Map(); ownerRows.forEach((row) => { const u = row.unit ? normUnit(row.unit) : (streetNumber(row.address) ?? undefined); if (!u) return; if (row.account) unitToAccount.set(u, row.account); });
-      const units = Array.from(unitsSet).sort(byNumericUnitOrder); const usageBy
-      // ... rest of allocation & workbook code same ...
+      const normUnit = (u) => {
+        const n = String(u).match(/\d+/)?.[0];
+        return n ? n : String(u).trim();
+      };
+      const unitsSet = new Set();
+      usageRows.forEach((r) => unitsSet.add(normUnit(r.unit)));
+      const unitToAccount = new Map();
+      ownerRows.forEach((row) => {
+        const u = row.unit
+          ? normUnit(row.unit)
+          : streetNumber(row.address) ?? undefined;
+        if (!u) return;
+        if (row.account) unitToAccount.set(u, row.account);
+      });
+      const units = Array.from(unitsSet).sort(byNumericUnitOrder);
+      const usageByUnit = new Map();
+      usageRows.forEach(({ unit, usage }) => {
+        const key = normUnit(unit);
+        usageByUnit.set(key, (usageByUnit.get(key) || 0) + (isFinite(usage) ? usage : 0));
+      });
+      const totalUsage = Array.from(usageByUnit.values()).reduce((a, b) => a + b, 0);
+      const nUnits = units.length || 1;
+      const cents = (n) => Math.round(n * 100);
+      const fromCents = (c) => Number((c / 100).toFixed(2));
+      const categories = [
+        { key: "water", type: "usage", label: "Water" },
+        { key: "sewer", type: "usage", label: "Sewer" },
+        { key: "stormwater", type: "flat", label: "Stormwater" },
+        { key: "base", type: "flat", label: "Base Charge" },
+        { key: "superfund", type: "flat", label: "Portland Harbor Superfund" },
+      ];
+
+      const perUnit = {};
+      units.forEach((u) => {
+        perUnit[u] = {
+          unit: u,
+          usage: usageByUnit.get(u) || 0,
+          Water: 0,
+          Sewer: 0,
+          Stormwater: 0,
+          "Base Charge": 0,
+          "Portland Harbor Superfund": 0,
+        };
+      });
+
+      categories.forEach((cat) => {
+        const total = bill.totals[cat.key] || 0;
+        const totalC = cents(total);
+        if (totalC === 0) return;
+        if (cat.type === "usage") {
+          if (totalUsage === 0) {
+            const baseC = Math.floor(totalC / nUnits);
+            let remainder = totalC - baseC * nUnits;
+            units.forEach((u, i) => {
+              const add = i < remainder ? 1 : 0;
+              perUnit[u][cat.label] += baseC + add;
+            });
+          } else {
+            const prelim = units.map((u) => [
+              u,
+              usageByUnit.get(u) || 0,
+              Math.floor(((usageByUnit.get(u) || 0) / totalUsage) * totalC),
+            ]);
+            let assigned = prelim.reduce((a, [, , c]) => a + c, 0);
+            let remainder = totalC - assigned;
+            prelim.sort((a, b) => b[1] - a[1] || byNumericUnitOrder(a[0], b[0]));
+            let idx = 0;
+            while (remainder > 0) {
+              const [u] = prelim[idx % prelim.length];
+              perUnit[u][cat.label] += 1;
+              remainder--;
+              idx++;
+            }
+            prelim.forEach(([u, , c]) => {
+              perUnit[u][cat.label] += c;
+            });
+          }
+        } else {
+          const baseC = Math.floor(totalC / nUnits);
+          let remainder = totalC - baseC * nUnits;
+          units.forEach((u, i) => {
+            const add = i < remainder ? 1 : 0;
+            perUnit[u][cat.label] += baseC + add;
+          });
+        }
+      });
+
+      const rows = units.map((u) => {
+        const row = perUnit[u];
+        const r = {
+          Unit: u,
+          Usage: row.usage,
+          Water: fromCents(row["Water"]),
+          Sewer: fromCents(row["Sewer"]),
+          Stormwater: fromCents(row["Stormwater"]),
+          "Base Charge": fromCents(row["Base Charge"]),
+          "Portland Harbor Superfund": fromCents(row["Portland Harbor Superfund"]),
+        };
+        r.Total = Number(
+          (
+            r.Water +
+            r.Sewer +
+            r.Stormwater +
+            r["Base Charge"] +
+            r["Portland Harbor Superfund"]
+          ).toFixed(2)
+        );
+        return r;
+      });
+      const totalsRow = rows.reduce(
+        (acc, r) => {
+          acc.Usage += r.Usage;
+          acc.Water += r.Water;
+          acc.Sewer += r.Sewer;
+          acc.Stormwater += r.Stormwater;
+          acc["Base Charge"] += r["Base Charge"];
+          acc["Portland Harbor Superfund"] += r["Portland Harbor Superfund"];
+          acc.Total += r.Total;
+          return acc;
+        },
+        {
+          Unit: "TOTALS",
+          Usage: 0,
+          Water: 0,
+          Sewer: 0,
+          Stormwater: 0,
+          "Base Charge": 0,
+          "Portland Harbor Superfund": 0,
+          Total: 0,
+        }
+      );
+      return { rows, totalsRow, unitToAccount };
     }
 
-    // Remainder of code unchanged...
+    function buildWorkbooks({ bill, alloc, chargeName }) {
+      const fmt = (d) => (d ? d.toLocaleDateString() : "");
+      const preparedOn = new Date();
+      const summaryData = [
+        ["Billing Start", fmt(bill.billingStart)],
+        ["Billing End", fmt(bill.billingEnd)],
+        ["Bill Date", fmt(bill.billDate)],
+        ["Due Date", fmt(bill.dueDate)],
+        ["Water (usage)", bill.totals.water],
+        ["Sewer (usage)", bill.totals.sewer],
+        ["Stormwater (flat)", bill.totals.stormwater],
+        ["Base (flat)", bill.totals.base],
+        ["Portland Harbor Superfund (flat)", bill.totals.superfund],
+        ["Prepared On", preparedOn.toLocaleString()],
+        ["Notes", "Usage-based = proportional by unit usage; Flat = equal per unit; Penny reconciliation: usage cats by high‑usage first; flat by unit order."],
+      ];
+      const allocHeader = [
+        "Unit",
+        "Usage",
+        "Water",
+        "Sewer",
+        "Stormwater",
+        "Base Charge",  
+        "Portland Harbor Superfund",
+        "Total",
+      ];
+      const allocRows = [
+        allocHeader,
+        ...alloc.rows.map((r) => allocHeader.map((h) => r[h])),
+        allocHeader.map((h) => (alloc.totalsRow[h] ?? (h === "Unit" ? "TOTALS" : 0))),
+      ];
+
+      const importDate = toStartOfNextMonth(bill.billingEnd || bill.billDate);
+      const description = `${bill.billingStart?.toLocaleDateString() || ""} to ${bill.billingEnd?.toLocaleDateString() || ""}`;
+      const importHeader = ["account", "charge", "amount", "date", "description"];
+      const importRows = alloc.rows.map((r) => [
+        alloc.unitToAccount.get(r.Unit) || "",
+        chargeName,
+        Number(r.Total.toFixed(2)),
+        importDate.toISOString().substring(0, 10),
+        description,
+      ]);
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryData), "Summary");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([allocHeader, ...alloc.rows.map((r) => allocHeader.map((h) => r[h])), allocHeader.map((h) => alloc.totalsRow[h] ?? (h === "Unit" ? "TOTALS" : 0))]), "Allocations");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([importHeader, ...importRows]), "Import");
+      const fullXlsx = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+
+      const wbImp = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wbImp, XLSX.utils.aoa_to_sheet([importHeader, ...importRows]), "Import");
+      const importXlsx = XLSX.write(wbImp, { type: "array", bookType: "xlsx" });
+
+      const csv = Papa.unparse([importHeader, ...importRows]);
+
+      return { fullXlsx, importXlsx, importCsv: csv };
+    }
+
+    function setMessage(t) {
+      msg.textContent = t || "";
+    }
+    function clearDownloads() {
+      downloads.innerHTML = "";
+    }
+    function addDownload(label, blob, name) {
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = name;
+      a.className = "flex items-center justify-between rounded-2xl border border-zinc-200 bg-white p-4 text-sm shadow-sm hover:shadow";
+      a.innerHTML = `<div class="flex items-center gap-3"><span class="text-teal-600">⬇</span><span>${label}</span></div><span class="text-xs text-zinc-400">${name}</span>`;
+      downloads.appendChild(a);
+    }
+
+    $("process").addEventListener("click", async () => {
+      try {
+        setMessage("");
+        clearDownloads();
+        const billFile = $("bill").files[0];
+        const usageFile = $("usage").files[0];
+        const ownerFile = $("owner").files[0];
+        if (!billFile || !usageFile || !ownerFile) {
+          setMessage("Please add all three files: Bill PDF, Usage CSV, and Owner Export.");
+          return;
+        }
+        setMessage("Processing…");
+
+        let bill = await parseBillPDF(billFile);
+        const missing = [];
+        if (!bill.billingStart) missing.push("Billing Start");
+        if (!bill.billingEnd) missing.push("Billing End");
+        if (!bill.billDate) missing.push("Bill Date");
+        if (!bill.dueDate) missing.push("Due Date");
+        const cats = bill.totals;
+        const missingCats = Object.entries({
+          Water: cats.water,
+          Sewer: cats.sewer,
+          Stormwater: cats.stormwater,
+          Base: cats.base,
+          Superfund: cats.superfund,
+        })
+          .filter(([, v]) => !v || v === 0)
+          .map(([k]) => k);
+        if (missing.length || missingCats.length)
+          setMessage(
+            `Missing items: ${[...missing, ...missingCats].join(
+              ", "
+            )}. You can fill them in the fields above, then click Process again.`
+          );
+
+        const val = (id) => (document.getElementById(id)?.value || "").trim();
+        const maybeDate = (id, prev) => {
+          const v = val(id);
+          return v ? new Date(v) : prev;
+        };
+        const maybeMoney = (id, prev) => {
+          const v = val(id);
+          return v ? Number(v) : prev;
+        };
+        bill = {
+          ...bill,
+          billingStart: maybeDate("fix-billingStart", bill.billingStart),
+          billingEnd: maybeDate("fix-billingEnd", bill.billingEnd),
+          billDate: maybeDate("fix-billDate", bill.billDate),
+          dueDate: maybeDate("fix-dueDate", bill.dueDate),
+          totals: {
+            water: maybeMoney("fix-water", bill.totals.water),
+            sewer: maybeMoney("fix-sewer", bill.totals.sewer),
+            stormwater: maybeMoney("fix-stormwater", bill.totals.stormwater),
+            base: maybeMoney("fix-base", bill.totals.base),
+            superfund: maybeMoney("fix-superfund", bill.totals.superfund),
+          },
+        };
+
+        const usageRows = parseUsageCSV(await fileToText(usageFile));
+        const ownerRows = parseOwnerExport(await fileToText(ownerFile));
+
+        const alloc = allocate(bill, usageRows, ownerRows);
+        const chargeName = chargeNameInput.value || "Water Billing";
+        const { fullXlsx, importXlsx, importCsv } = buildWorkbooks({ bill, alloc, chargeName });
+
+        addDownload(
+          "Download Full Workbook (xlsx)",
+          new Blob([fullXlsx], {
+            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          }),
+          `MicroHOA_Allocation_${Date.now()}.xlsx`
+        );
+        addDownload(
+          "Download Import Only (xlsx)",
+          new Blob([importXlsx], {
+            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          }),
+          `MicroHOA_Import_${Date.now()}.xlsx`
+        );
+        addDownload(
+          "Download Import Only (csv)",
+          new Blob([importCsv], {
+            type: "text/csv",
+          }),
+          `MicroHOA_Import_${Date.now()}.csv`
+        );
+
+        localStorage.setItem("mh_charge_name", chargeName);
+        setMessage("All set! Files are ready below.");
+      } catch (e) {
+        console.error(e);
+        setMessage("Something went wrong. Please check your files and try again.");
+      }
+    });
   </script>
 </body>
 </html>
