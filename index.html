@@ -182,12 +182,13 @@
       r.onerror = rej;
       r.readAsArrayBuffer(f);
     });
-    const fileToText = (f) => new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result);
-      r.onerror = rej;
-      r.readAsText(f);
-    });
+   const fileToText = (f) => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(r.result);
+  r.onerror = rej;
+  r.readAsText(f);
+});
+
     const normalizeMoney = (s) => Number(String(s).replace(/[^\d.-]/g, "")) || 0;
     const byNumericUnitOrder = (a,b) => {
       const na = Number(String(a).replace(/\D/g, ""));
