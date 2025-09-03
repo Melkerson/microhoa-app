@@ -199,61 +199,112 @@
     };
 
     // FIXED: Portland Water Bureau specific PDF parser
-    async function parseBillPDF(file) {
-      try {
-        const ab = await fileToArrayBuffer(file);
-        const loadingTask = pdfjsLib.getDocument(ab);
-        const doc = await loadingTask.promise;
-        
-        let text = "";
-        for (let p = 1; p <= doc.numPages; p++) {
-          const page = await doc.getPage(p);
-          const content = await page.getTextContent();
-          text += "\n" + content.items.map((it) => it.str || "").join("\n");
+    // Replace your parseBillPDF function with this more precise version:
+
+async function parseBillPDF(file) {
+  try {
+    const ab = await fileToArrayBuffer(file);
+    const loadingTask = pdfjsLib.getDocument(ab);
+    const doc = await loadingTask.promise;
+    
+    let text = "";
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const content = await page.getTextContent();
+      text += "\n" + content.items.map((it) => it.str || "").join("\n");
+    }
+    
+    const t = text.replace(/\u00A0/g, " ");
+    
+    console.log("=== EXTRACTED PDF TEXT (first 1000 chars) ===");
+    console.log(t.substring(0, 1000));
+    
+    // More precise Portland parsing - look for the line with the service and extract the final dollar amount
+    const findPortlandAmount = (serviceName) => {
+      // Look for lines that contain the service name and extract all dollar amounts
+      const lines = t.split('\n');
+      for (let line of lines) {
+        if (line.toLowerCase().includes(serviceName.toLowerCase())) {
+          console.log(`Found line for ${serviceName}: "${line}"`);
+          // Extract all dollar amounts from this line
+          const dollarMatches = line.match(/\$\s*([0-9,]+\.?[0-9]*)/g);
+          if (dollarMatches && dollarMatches.length > 0) {
+            // Take the last (usually largest) dollar amount from the line
+            const lastAmount = dollarMatches[dollarMatches.length - 1];
+            const cleanAmount = lastAmount.replace(/[^0-9.]/g, '');
+            const result = parseFloat(cleanAmount) || 0;
+            console.log(`  -> Dollar amounts found: ${dollarMatches.join(', ')}`);
+            console.log(`  -> Using last amount: ${lastAmount} = ${result}`);
+            return result;
+          }
         }
-        
-        const t = text.replace(/\u00A0/g, " ");
-        
-        // Portland Water Bureau specific parsing patterns
-        const findPortlandMoney = (pattern) => {
-          const match = t.match(pattern);
-          if (match) {
-            const amount = match[1].replace(/[^\d.-]/g, "");
-            return Number(amount) || 0;
-          }
-          return 0;
-        };
-        
-        // Look for the specific format in Portland bills
-        const water = findPortlandMoney(/Water\s+Volume[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
-        const sewer = findPortlandMoney(/Sewer\s+Volume[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
-        
-        // Stormwater has two components that need to be added
-        const stormwaterBillable = findPortlandMoney(/Stormwater\s+Billable\s+Area[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
-        const stormwaterService = findPortlandMoney(/Stormwater\s+Service\s+Unit[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
-        const stormwater = stormwaterBillable + stormwaterService;
-        
-        const superfund = findPortlandMoney(/Portland\s+Harbor\s+Superfund[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
-        const base = findPortlandMoney(/Base\s+Charge[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
+      }
+      console.log(`No line found for ${serviceName}`);
+      return 0;
+    };
+    
+    // Parse each service with more specific names
+    const water = findPortlandAmount("Water Volume");
+    const sewer = findPortlandAmount("Sewer Volume"); 
+    const stormwaterBillable = findPortlandAmount("Stormwater Billable Area");
+    const stormwaterService = findPortlandAmount("Stormwater Service Unit");
+    const stormwater = stormwaterBillable + stormwaterService;
+    const superfund = findPortlandAmount("Portland Harbor Superfund");
+    const base = findPortlandAmount("Base Charge");
 
-        // Parse dates - Portland format
-        const parsePortlandDate = (pattern) => {
-          const match = t.match(pattern);
-          if (match) {
-            const dateStr = match[1].trim();
-            // Handle MM/DD/YY format
-            const dateMatch = dateStr.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
-            if (dateMatch) {
-              let year = parseInt(dateMatch[3]);
-              if (year < 100) year += 2000; // Convert 2-digit year
-              const month = parseInt(dateMatch[1]) - 1; // JavaScript months are 0-based
-              const day = parseInt(dateMatch[2]);
-              return new Date(year, month, day);
-            }
+    // Parse dates with simpler patterns
+    const extractDate = (pattern) => {
+      const match = t.match(pattern);
+      if (match) {
+        console.log(`Date pattern matched: ${match[0]} -> ${match[1]}`);
+        const dateStr = match[1].trim();
+        // Try different date formats
+        let date = new Date(dateStr);
+        if (isNaN(date.getTime())) {
+          // Try MM/DD/YY format
+          const mmddyy = dateStr.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+          if (mmddyy) {
+            let year = parseInt(mmddyy[3]);
+            if (year < 100) year += 2000;
+            date = new Date(year, parseInt(mmddyy[1]) - 1, parseInt(mmddyy[2]));
           }
-          return undefined;
-        };
+        }
+        return isNaN(date.getTime()) ? undefined : date;
+      }
+      return undefined;
+    };
 
+    const billingStart = extractDate(/Billing Period\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+    const billingEnd = extractDate(/(\d{1,2}\/\d{1,2}\/\d{2,4})\s*$/i); // End date is usually at end of period
+    const billDate = extractDate(/Bill Date\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+    const dueDate = extractDate(/Due Date\s+([A-Za-z]{3}\s+\d{1,2},\s*\d{4})/i);
+
+    console.log("=== FINAL PORTLAND PARSING RESULTS ===");
+    console.log("Water Volume:", water);
+    console.log("Sewer Volume:", sewer);
+    console.log("Stormwater Billable:", stormwaterBillable);
+    console.log("Stormwater Service:", stormwaterService);
+    console.log("Stormwater Total:", stormwater);
+    console.log("Superfund:", superfund);
+    console.log("Base Charge:", base);
+    console.log("Billing Start:", billingStart);
+    console.log("Billing End:", billingEnd);
+    console.log("Bill Date:", billDate);
+    console.log("Due Date:", dueDate);
+
+    return {
+      billingStart,
+      billingEnd,
+      billDate,
+      dueDate,
+      totals: { water, sewer, stormwater, base, superfund },
+      rawText: t,
+    };
+  } catch (error) {
+    console.error('PDF parsing error:', error);
+    throw new Error('Failed to parse PDF. Please check the file and try again.');
+  }
+}
         // Portland bill date patterns
         const billingStart = parsePortlandDate(/Billing\s+Period\s+(\d{1,2}\/\d{1,2}\/\d{2,4})-/i);
         const billingEnd = parsePortlandDate(/Billing\s+Period\s+\d{1,2}\/\d{1,2}\/\d{2,4}-(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
