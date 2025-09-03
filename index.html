@@ -140,21 +140,10 @@
 
   <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script type="module">
-    // Fixed PDF.js initialization to avoid CORS issues
-    let pdfjsLib;
-    
-    try {
-      // Try to load PDF.js from CDN with proper worker setup
-      pdfjsLib = await import("https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.mjs");
-      
-      // Set up worker with proper fallback - this is the key fix!
-      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
-    } catch (error) {
-      console.error('Failed to load PDF.js:', error);
-      // Fallback alert for users
-      pdfjsLib = null;
-    }
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@2.16.105/build/pdf.min.js"></script>
+  <script>
+    // Set PDF.js worker - using older, more stable version
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@2.16.105/build/pdf.worker.min.js';
 
     const $ = (id) => document.getElementById(id);
     const msg = $("msg");
@@ -181,12 +170,14 @@
       const base = d || new Date();
       return new Date(base.getFullYear(), base.getMonth() + 1, 1);
     };
+    
     const fileToArrayBuffer = (f) => new Promise((res, rej) => {
       const r = new FileReader();
       r.onload = () => res(r.result);
       r.onerror = rej;
       r.readAsArrayBuffer(f);
     });
+    
     const fileToText = (f) => new Promise((res, rej) => {
       const r = new FileReader();
       r.onload = () => res(r.result);
@@ -208,13 +199,9 @@
     };
 
     async function parseBillPDF(file) {
-      if (!pdfjsLib) {
-        throw new Error('PDF processing is not available. Please try refreshing the page.');
-      }
-      
       try {
         const ab = await fileToArrayBuffer(file);
-        const loadingTask = pdfjsLib.getDocument({ data: ab });
+        const loadingTask = pdfjsLib.getDocument(ab);
         const doc = await loadingTask.promise;
         
         let text = "";
@@ -564,3 +551,49 @@
           dueDate: maybeDate("fix-dueDate", bill.dueDate),
           totals: {
             water: maybeMoney("fix-water", bill.totals.water),
+            sewer: maybeMoney("fix-sewer", bill.totals.sewer),
+            stormwater: maybeMoney("fix-stormwater", bill.totals.stormwater),
+            base: maybeMoney("fix-base", bill.totals.base),
+            superfund: maybeMoney("fix-superfund", bill.totals.superfund),
+          },
+        };
+
+        const usageRows = parseUsageCSV(await fileToText(usageFile));
+        const ownerRows = parseOwnerExport(await fileToText(ownerFile));
+
+        const alloc = allocate(bill, usageRows, ownerRows);
+        const chargeName = chargeNameInput.value || "Water Billing";
+        const { fullXlsx, importXlsx, importCsv } = buildWorkbooks({ bill, alloc, chargeName });
+
+        addDownload(
+          "Download Full Workbook (xlsx)",
+          new Blob([fullXlsx], {
+            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          }),
+          `MicroHOA_Allocation_${Date.now()}.xlsx`
+        );
+        addDownload(
+          "Download Import Only (xlsx)",
+          new Blob([importXlsx], {
+            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          }),
+          `MicroHOA_Import_${Date.now()}.xlsx`
+        );
+        addDownload(
+          "Download Import Only (csv)",
+          new Blob([importCsv], {
+            type: "text/csv",
+          }),
+          `MicroHOA_Import_${Date.now()}.csv`
+        );
+
+        localStorage.setItem("mh_charge_name", chargeName);
+        setMessage("All set! Files are ready below.");
+      } catch (e) {
+        console.error(e);
+        setMessage("Something went wrong. Please check your files and try again.");
+      }
+    });
+  </script>
+</body>
+</html>
