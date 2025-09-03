@@ -198,6 +198,7 @@
       return m ? m[1] : undefined;
     };
 
+    // FIXED: Portland Water Bureau specific PDF parser
     async function parseBillPDF(file) {
       try {
         const ab = await fileToArrayBuffer(file);
@@ -212,27 +213,60 @@
         }
         
         const t = text.replace(/\u00A0/g, " ");
-        const findMoney = (label) => {
-          const m = t.match(new RegExp(label.source + `[":\\s-]*\\$?\\s*([\\n\\r\\t\\s$,\\d.-]+)`, "i"));
-          return m ? Number(String(m[1]).replace(/[^\d.-]/g, "")) : 0;
+        
+        // Portland Water Bureau specific parsing patterns
+        const findPortlandMoney = (pattern) => {
+          const match = t.match(pattern);
+          if (match) {
+            const amount = match[1].replace(/[^\d.-]/g, "");
+            return Number(amount) || 0;
+          }
+          return 0;
         };
-        const water = findMoney(/\bWater\b/);
-        const sewer = findMoney(/\bSewer\b/);
-        const storm1 = findMoney(/Stormwater\s*(?:Total)?/);
-        const billableArea = findMoney(/Billable\s*Area/);
-        const serviceUnit = findMoney(/Service\s*Unit/);
-        const stormwater = storm1 || (billableArea + serviceUnit);
-        const base = findMoney(/Base(\s*Charge)?/);
-        const superfund = findMoney(/Portland\s*Harbor\s*Superfund/);
+        
+        // Look for the specific format in Portland bills
+        const water = findPortlandMoney(/Water\s+Volume[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
+        const sewer = findPortlandMoney(/Sewer\s+Volume[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
+        
+        // Stormwater has two components that need to be added
+        const stormwaterBillable = findPortlandMoney(/Stormwater\s+Billable\s+Area[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
+        const stormwaterService = findPortlandMoney(/Stormwater\s+Service\s+Unit[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
+        const stormwater = stormwaterBillable + stormwaterService;
+        
+        const superfund = findPortlandMoney(/Portland\s+Harbor\s+Superfund[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
+        const base = findPortlandMoney(/Base\s+Charge[^$]*\$\s*([0-9,]+\.?[0-9]*)/i);
 
-        const dateAfter = (label) => {
-          const m = t.match(new RegExp(label.source + `[\\"\\s:]*([^\\n\\r]+)`, "i"));
-          return m ? parseUsDate(m[1].trim()) : undefined;
+        // Parse dates - Portland format
+        const parsePortlandDate = (pattern) => {
+          const match = t.match(pattern);
+          if (match) {
+            const dateStr = match[1].trim();
+            // Handle MM/DD/YY format
+            const dateMatch = dateStr.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+            if (dateMatch) {
+              let year = parseInt(dateMatch[3]);
+              if (year < 100) year += 2000; // Convert 2-digit year
+              const month = parseInt(dateMatch[1]) - 1; // JavaScript months are 0-based
+              const day = parseInt(dateMatch[2]);
+              return new Date(year, month, day);
+            }
+          }
+          return undefined;
         };
-        const billingStart = dateAfter(/Billing\s*Start/);
-        const billingEnd = dateAfter(/Billing\s*End/);
-        const billDate = dateAfter(/Bill\s*Date/);
-        const dueDate = dateAfter(/Due\s*Date/);
+
+        // Portland bill date patterns
+        const billingStart = parsePortlandDate(/Billing\s+Period\s+(\d{1,2}\/\d{1,2}\/\d{2,4})-/i);
+        const billingEnd = parsePortlandDate(/Billing\s+Period\s+\d{1,2}\/\d{1,2}\/\d{2,4}-(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+        const billDate = parsePortlandDate(/Billing\s+Date\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+        const dueDate = parsePortlandDate(/Due\s+Date\s+([A-Za-z]{3}\s+\d{1,2},\s*\d{4})/i) || parsePortlandDate(/Due\s+Date\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+
+        console.log("=== PORTLAND BILL PARSING ===");
+        console.log("Water Volume:", water);
+        console.log("Sewer Volume:", sewer);
+        console.log("Stormwater Total:", stormwater, "(Billable:", stormwaterBillable, "+ Service:", stormwaterService, ")");
+        console.log("Superfund:", superfund);
+        console.log("Base Charge:", base);
+        console.log("Dates - Start:", billingStart, "End:", billingEnd, "Bill:", billDate, "Due:", dueDate);
 
         return {
           billingStart,
