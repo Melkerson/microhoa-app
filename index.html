@@ -319,12 +319,7 @@ async function parseBillPDF(file) {
         console.log("Base Charge:", base);
         console.log("Dates - Start:", billingStart, "End:", billingEnd, "Bill:", billDate, "Due:", dueDate);
 
-        return {
-          billingStart,
-          billingEnd,
-          billDate,
-          dueDate,
-          totals: { water, sewer, stormwater, base, superfund },
+       
           rawText: t,
         };
       } catch (error) {
