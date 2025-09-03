@@ -59,7 +59,7 @@
         <div>
           <label for="bill" class="label">Bill PDF</label>
           <input id="bill" type="file" accept="application/pdf" class="input" />
-          <p class="help mt-1">Utility bill (PDF). I’ll parse dates & category totals.</p>
+          <p class="help mt-1">Utility bill (PDF). I'll parse dates & category totals.</p>
         </div>
         <div>
           <label for="usage" class="label">Usage CSV</label>
@@ -141,11 +141,20 @@
   <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script type="module">
-    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.mjs";
-    pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(
-      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.worker.mjs",
-      { type: "module" }
-    );
+    // Fixed PDF.js initialization to avoid CORS issues
+    let pdfjsLib;
+    
+    try {
+      // Try to load PDF.js from CDN with proper worker setup
+      pdfjsLib = await import("https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.mjs");
+      
+      // Set up worker with proper fallback - this is the key fix!
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+    } catch (error) {
+      console.error('Failed to load PDF.js:', error);
+      // Fallback alert for users
+      pdfjsLib = null;
+    }
 
     const $ = (id) => document.getElementById(id);
     const msg = $("msg");
@@ -199,45 +208,57 @@
     };
 
     async function parseBillPDF(file) {
-      const ab = await fileToArrayBuffer(file);
-      const doc = await pdfjsLib.getDocument({ data: ab }).promise;
-      let text = "";
-      for (let p = 1; p <= doc.numPages; p++) {
-        const page = await doc.getPage(p);
-        const content = await page.getTextContent();
-        text += "\n" + content.items.map((it) => it.str || "").join("\n");
+      if (!pdfjsLib) {
+        throw new Error('PDF processing is not available. Please try refreshing the page.');
       }
-      const t = text.replace(/\u00A0/g, " ");
-      const findMoney = (label) => {
-        const m = t.match(new RegExp(label.source + `[":\\s-]*\\$?\\s*([\\n\\r\\t\\s$,\\d.-]+)`, "i"));
-        return m ? Number(String(m[1]).replace(/[^\d.-]/g, "")) : 0;
-      };
-      const water = findMoney(/\bWater\b/);
-      const sewer = findMoney(/\bSewer\b/);
-      const storm1 = findMoney(/Stormwater\s*(?:Total)?/);
-      const billableArea = findMoney(/Billable\s*Area/);
-      const serviceUnit = findMoney(/Service\s*Unit/);
-      const stormwater = storm1 || (billableArea + serviceUnit);
-      const base = findMoney(/Base(\s*Charge)?/);
-      const superfund = findMoney(/Portland\s*Harbor\s*Superfund/);
+      
+      try {
+        const ab = await fileToArrayBuffer(file);
+        const loadingTask = pdfjsLib.getDocument({ data: ab });
+        const doc = await loadingTask.promise;
+        
+        let text = "";
+        for (let p = 1; p <= doc.numPages; p++) {
+          const page = await doc.getPage(p);
+          const content = await page.getTextContent();
+          text += "\n" + content.items.map((it) => it.str || "").join("\n");
+        }
+        
+        const t = text.replace(/\u00A0/g, " ");
+        const findMoney = (label) => {
+          const m = t.match(new RegExp(label.source + `[":\\s-]*\\$?\\s*([\\n\\r\\t\\s$,\\d.-]+)`, "i"));
+          return m ? Number(String(m[1]).replace(/[^\d.-]/g, "")) : 0;
+        };
+        const water = findMoney(/\bWater\b/);
+        const sewer = findMoney(/\bSewer\b/);
+        const storm1 = findMoney(/Stormwater\s*(?:Total)?/);
+        const billableArea = findMoney(/Billable\s*Area/);
+        const serviceUnit = findMoney(/Service\s*Unit/);
+        const stormwater = storm1 || (billableArea + serviceUnit);
+        const base = findMoney(/Base(\s*Charge)?/);
+        const superfund = findMoney(/Portland\s*Harbor\s*Superfund/);
 
-      const dateAfter = (label) => {
-        const m = t.match(new RegExp(label.source + `[\\"\\s:]*([^\\n\\r]+)`, "i"));
-        return m ? parseUsDate(m[1].trim()) : undefined;
-      };
-      const billingStart = dateAfter(/Billing\s*Start/);
-      const billingEnd = dateAfter(/Billing\s*End/);
-      const billDate = dateAfter(/Bill\s*Date/);
-      const dueDate = dateAfter(/Due\s*Date/);
+        const dateAfter = (label) => {
+          const m = t.match(new RegExp(label.source + `[\\"\\s:]*([^\\n\\r]+)`, "i"));
+          return m ? parseUsDate(m[1].trim()) : undefined;
+        };
+        const billingStart = dateAfter(/Billing\s*Start/);
+        const billingEnd = dateAfter(/Billing\s*End/);
+        const billDate = dateAfter(/Bill\s*Date/);
+        const dueDate = dateAfter(/Due\s*Date/);
 
-      return {
-        billingStart,
-        billingEnd,
-        billDate,
-        dueDate,
-        totals: { water, sewer, stormwater, base, superfund },
-        rawText: t,
-      };
+        return {
+          billingStart,
+          billingEnd,
+          billDate,
+          dueDate,
+          totals: { water, sewer, stormwater, base, superfund },
+          rawText: t,
+        };
+      } catch (error) {
+        console.error('PDF parsing error:', error);
+        throw new Error('Failed to parse PDF. Please check the file and try again.');
+      }
     }
 
     function parseUsageCSV(text) {
@@ -543,50 +564,3 @@
           dueDate: maybeDate("fix-dueDate", bill.dueDate),
           totals: {
             water: maybeMoney("fix-water", bill.totals.water),
-            sewer: maybeMoney("fix-sewer", bill.totals.sewer),
-            stormwater: maybeMoney("fix-stormwater", bill.totals.stormwater),
-            base: maybeMoney("fix-base", bill.totals.base),
-            superfund: maybeMoney("fix-superfund", bill.totals.superfund),
-          },
-        };
-
-        const usageRows = parseUsageCSV(await fileToText(usageFile));
-        const ownerRows = parseOwnerExport(await fileToText(ownerFile));
-
-        const alloc = allocate(bill, usageRows, ownerRows);
-        const chargeName = chargeNameInput.value || "Water Billing";
-        const { fullXlsx, importXlsx, importCsv } = buildWorkbooks({ bill, alloc, chargeName });
-
-        addDownload(
-          "Download Full Workbook (xlsx)",
-          new Blob([fullXlsx], {
-            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          }),
-          `MicroHOA_Allocation_${Date.now()}.xlsx`
-        );
-        addDownload(
-          "Download Import Only (xlsx)",
-          new Blob([importXlsx], {
-            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          }),
-          `MicroHOA_Import_${Date.now()}.xlsx`
-        );
-        addDownload(
-          "Download Import Only (csv)",
-          new Blob([importCsv], {
-            type: "text/csv",
-          }),
-          `MicroHOA_Import_${Date.now()}.csv`
-        );
-
-        localStorage.setItem("mh_charge_name", chargeName);
-        setMessage("All set! Files are ready below.");
-      } catch (e) {
-        console.error(e);
-        setMessage("Something went wrong. Please check your files and try again.");
-      }
-    });
-  </script>
-</body>
-</html>
-
