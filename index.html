@@ -169,14 +169,14 @@
       const base = d || new Date();
       return new Date(base.getFullYear(), base.getMonth() + 1, 1);
     };
-    
+
     const fileToArrayBuffer = (f) => new Promise((res, rej) => {
       const r = new FileReader();
       r.onload = () => res(r.result);
       r.onerror = rej;
       r.readAsArrayBuffer(f);
     });
-    
+
     const fileToText = (f) => new Promise((res, rej) => {
       const r = new FileReader();
       r.onload = () => res(r.result);
@@ -184,7 +184,6 @@
       r.readAsText(f);
     });
 
-    const normalizeMoney = (s) => Number(String(s).replace(/[^\d.-]/g, "")) || 0;
     const byNumericUnitOrder = (a, b) => {
       const na = Number(String(a).replace(/\D/g, ""));
       const nb = Number(String(b).replace(/\D/g, ""));
@@ -197,39 +196,40 @@
       return m ? m[1] : undefined;
     };
 
+    // === FIX 1: money parser returns undefined when a label isn't found (not 0) ===
+    const moneyFromTextAfterLabel = (t, label) => {
+      const m = t.match(new RegExp(label.source + `[":\s-]*\$?\s*([\n\r\t\s$,\d.-]+)`, "i"));
+      if (!m) return undefined; // important: differentiate missing vs 0
+      const n = Number(String(m[1]).replace(/[^\d.-]/g, ""));
+      return isFinite(n) ? n : undefined;
+    };
+
     async function parseBillPDF(file) {
       try {
         const ab = await fileToArrayBuffer(file);
         const loadingTask = pdfjsLib.getDocument(ab);
         const doc = await loadingTask.promise;
-        
+
         let text = "";
         for (let p = 1; p <= doc.numPages; p++) {
           const page = await doc.getPage(p);
           const content = await page.getTextContent();
           text += "\n" + content.items.map((it) => it.str || "").join("\n");
         }
-        
         const t = text.replace(/\u00A0/g, " ");
-        console.log("PDF parsed successfully");
-        
-        // For now, use the manual entry fields - we'll improve parsing after the app is stable
-        const findMoney = (label) => {
-          const m = t.match(new RegExp(label.source + `[":\\s-]*\\$?\\s*([\\n\\r\\t\\s$,\\d.-]+)`, "i"));
-          return m ? Number(String(m[1]).replace(/[^\d.-]/g, "")) : 0;
-        };
-        
-        const water = findMoney(/\bWater\b/);
-        const sewer = findMoney(/\bSewer\b/);
-        const storm1 = findMoney(/Stormwater\s*(?:Total)?/);
-        const billableArea = findMoney(/Billable\s*Area/);
-        const serviceUnit = findMoney(/Service\s*Unit/);
-        const stormwater = storm1 || (billableArea + serviceUnit);
-        const base = findMoney(/Base(\s*Charge)?/);
-        const superfund = findMoney(/Portland\s*Harbor\s*Superfund/);
+
+        // Pull values (possibly undefined if not found)
+        const water = moneyFromTextAfterLabel(t, /\bWater\b/);
+        const sewer = moneyFromTextAfterLabel(t, /\bSewer\b/);
+        const storm1 = moneyFromTextAfterLabel(t, /Stormwater\s*(?:Total)?/);
+        const billableArea = moneyFromTextAfterLabel(t, /Billable\s*Area/);
+        const serviceUnit = moneyFromTextAfterLabel(t, /Service\s*Unit/);
+        const stormwater = (storm1 ?? 0) || ((billableArea ?? 0) + (serviceUnit ?? 0)) || undefined;
+        const base = moneyFromTextAfterLabel(t, /Base(\s*Charge)?/);
+        const superfund = moneyFromTextAfterLabel(t, /Portland\s*Harbor\s*Superfund/);
 
         const dateAfter = (label) => {
-          const m = t.match(new RegExp(label.source + `[\\"\\s:]*([^\\n\\r]+)`, "i"));
+          const m = t.match(new RegExp(label.source + `[\"\\s:]*([^\n\r]+)`, "i"));
           return m ? parseUsDate(m[1].trim()) : undefined;
         };
         const billingStart = dateAfter(/Billing\s*Start/);
@@ -315,8 +315,11 @@
       });
       const totalUsage = Array.from(usageByUnit.values()).reduce((a, b) => a + b, 0);
       const nUnits = units.length || 1;
-      const cents = (n) => Math.round(n * 100);
+
+      // Work strictly in cents for penny perfection
+      const cents = (n) => Math.round((Number(n) || 0) * 100);
       const fromCents = (c) => Number((c / 100).toFixed(2));
+
       const categories = [
         { key: "water", type: "usage", label: "Water" },
         { key: "sewer", type: "usage", label: "Sewer" },
@@ -339,11 +342,13 @@
       });
 
       categories.forEach((cat) => {
-        const total = bill.totals[cat.key] || 0;
+        const total = bill.totals[cat.key] ?? 0; // treat missing as 0 for math
         const totalC = cents(total);
         if (totalC === 0) return;
+
         if (cat.type === "usage") {
           if (totalUsage === 0) {
+            // no usage -> equal split
             const baseC = Math.floor(totalC / nUnits);
             let remainder = totalC - baseC * nUnits;
             units.forEach((u, i) => {
@@ -351,13 +356,14 @@
               perUnit[u][cat.label] += baseC + add;
             });
           } else {
-            const prelim = units.map((u) => [
-              u,
-              usageByUnit.get(u) || 0,
-              Math.floor(((usageByUnit.get(u) || 0) / totalUsage) * totalC),
-            ]);
+            const prelim = units.map((u) => {
+              const uUsage = usageByUnit.get(u) || 0;
+              const share = Math.floor((uUsage / totalUsage) * totalC);
+              return [u, uUsage, share];
+            });
             let assigned = prelim.reduce((a, [, , c]) => a + c, 0);
             let remainder = totalC - assigned;
+            // distribute remaining cents by highest usage first, then by unit order
             prelim.sort((a, b) => b[1] - a[1] || byNumericUnitOrder(a[0], b[0]));
             let idx = 0;
             while (remainder > 0) {
@@ -366,11 +372,13 @@
               remainder--;
               idx++;
             }
+            // add base shares after distributing pennies (order doesn't matter for totals)
             prelim.forEach(([u, , c]) => {
               perUnit[u][cat.label] += c;
             });
           }
         } else {
+          // flat categories split equally, remainder by sorted unit order
           const baseC = Math.floor(totalC / nUnits);
           let remainder = totalC - baseC * nUnits;
           units.forEach((u, i) => {
@@ -402,6 +410,7 @@
         );
         return r;
       });
+
       const totalsRow = rows.reduce(
         (acc, r) => {
           acc.Usage += r.Usage;
@@ -435,11 +444,11 @@
         ["Billing End", fmt(bill.billingEnd)],
         ["Bill Date", fmt(bill.billDate)],
         ["Due Date", fmt(bill.dueDate)],
-        ["Water (usage)", bill.totals.water],
-        ["Sewer (usage)", bill.totals.sewer],
-        ["Stormwater (flat)", bill.totals.stormwater],
-        ["Base (flat)", bill.totals.base],
-        ["Portland Harbor Superfund (flat)", bill.totals.superfund],
+        ["Water (usage)", bill.totals.water ?? 0],
+        ["Sewer (usage)", bill.totals.sewer ?? 0],
+        ["Stormwater (flat)", bill.totals.stormwater ?? 0],
+        ["Base (flat)", bill.totals.base ?? 0],
+        ["Portland Harbor Superfund (flat)", bill.totals.superfund ?? 0],
         ["Prepared On", preparedOn.toLocaleString()],
         ["Notes", "Usage-based = proportional by unit usage; Flat = equal per unit; Penny reconciliation: usage cats by high‑usage first; flat by unit order."],
       ];
@@ -449,12 +458,12 @@
         "Water",
         "Sewer",
         "Stormwater",
-        "Base Charge",  
+        "Base Charge",
         "Portland Harbor Superfund",
         "Total",
       ];
 
-      const importDate = toStartOfNextMonth(bill.billingEnd || bill.billDate);
+      const importDate = toStartOfNextMonth(bill.billingEnd || bill.billDate || new Date());
       const description = `${bill.billingStart?.toLocaleDateString() || ""} to ${bill.billingEnd?.toLocaleDateString() || ""}`;
       const importHeader = ["account", "charge", "amount", "date", "description"];
       const importRows = alloc.rows.map((r) => [
@@ -467,15 +476,23 @@
 
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryData), "Summary");
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([allocHeader, ...alloc.rows.map((r) => allocHeader.map((h) => r[h])), allocHeader.map((h) => alloc.totalsRow[h] ?? (h === "Unit" ? "TOTALS" : 0))]), "Allocations");
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([importHeader, ...importRows]), "Import");
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.aoa_to_sheet([
+          allocHeader,
+          ...alloc.rows.map((r) => allocHeader.map((h) => r[h])),
+          allocHeader.map((h) => alloc.totalsRow[h] ?? (h === "Unit" ? "TOTALS" : 0)),
+        ]),
+        "Allocations"
+      );
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["account","charge","amount","date","description"], ...importRows]), "Import");
       const fullXlsx = XLSX.write(wb, { type: "array", bookType: "xlsx" });
 
       const wbImp = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wbImp, XLSX.utils.aoa_to_sheet([importHeader, ...importRows]), "Import");
+      XLSX.utils.book_append_sheet(wbImp, XLSX.utils.aoa_to_sheet([["account","charge","amount","date","description"], ...importRows]), "Import");
       const importXlsx = XLSX.write(wbImp, { type: "array", bookType: "xlsx" });
 
-      const csv = Papa.unparse([importHeader, ...importRows]);
+      const csv = Papa.unparse([["account","charge","amount","date","description"], ...importRows]);
 
       return { fullXlsx, importXlsx, importCsv: csv };
     }
@@ -510,11 +527,14 @@
         setMessage("Processing…");
 
         let bill = await parseBillPDF(billFile);
+
+        // === FIX 2: Only flag truly missing fields (undefined), not legit zeros ===
         const missing = [];
-        if (!bill.billingStart) missing.push("Billing Start");
-        if (!bill.billingEnd) missing.push("Billing End");
-        if (!bill.billDate) missing.push("Bill Date");
-        if (!bill.dueDate) missing.push("Due Date");
+        if (bill.billingStart === undefined) missing.push("Billing Start");
+        if (bill.billingEnd === undefined) missing.push("Billing End");
+        if (bill.billDate === undefined) missing.push("Bill Date");
+        if (bill.dueDate === undefined) missing.push("Due Date");
+
         const cats = bill.totals;
         const missingCats = Object.entries({
           Water: cats.water,
@@ -523,8 +543,9 @@
           Base: cats.base,
           Superfund: cats.superfund,
         })
-          .filter(([, v]) => !v || v === 0)
+          .filter(([, v]) => v === undefined)
           .map(([k]) => k);
+
         if (missing.length || missingCats.length)
           setMessage(
             `Missing items: ${[...missing, ...missingCats].join(
@@ -535,12 +556,14 @@
         const val = (id) => (document.getElementById(id)?.value || "").trim();
         const maybeDate = (id, prev) => {
           const v = val(id);
-          return v ? new Date(v) : prev;
+          return v ? new Date(v + 'T00:00:00') : prev;
         };
+        const parseMoney = (v) => Number(String(v).replace(/[^\d.-]/g, "")) || 0;
         const maybeMoney = (id, prev) => {
           const v = val(id);
-          return v ? Number(v) : prev;
+          return v !== "" ? parseMoney(v) : (prev ?? 0);
         };
+
         bill = {
           ...bill,
           billingStart: maybeDate("fix-billingStart", bill.billingStart),
