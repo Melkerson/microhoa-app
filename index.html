@@ -196,12 +196,14 @@
       return m ? m[1] : undefined;
     };
 
-    // === FIX 1: money parser returns undefined when a label isn't found (not 0) ===
+    // --- Robust regex helpers (Vercel-friendly) ---
     const moneyFromTextAfterLabel = (t, label) => {
-      const m = t.match(new RegExp(label.source + `[":\s-]*\$?\s*([\n\r\t\s$,\d.-]+)`, "i"));
-      if (!m) return undefined; // important: differentiate missing vs 0
-      const n = Number(String(m[1]).replace(/[^\d.-]/g, ""));
-      return isFinite(n) ? n : undefined;
+      // Use String.raw to keep backslashes intact through any tooling
+      const pattern = new RegExp(label.source + String.raw`["\s:\-]*\$?\s*([\n\r\t\s$,\d.-]+)`, 'i');
+      const m = t.match(pattern);
+      if (!m) return undefined;
+      const n = Number(String(m[1]).replace(/[^\d.-]/g, ''));
+      return Number.isFinite(n) ? n : undefined;
     };
 
     async function parseBillPDF(file) {
@@ -210,15 +212,14 @@
         const loadingTask = pdfjsLib.getDocument(ab);
         const doc = await loadingTask.promise;
 
-        let text = "";
+        let text = '';
         for (let p = 1; p <= doc.numPages; p++) {
           const page = await doc.getPage(p);
           const content = await page.getTextContent();
-          text += "\n" + content.items.map((it) => it.str || "").join("\n");
+          text += '\n' + content.items.map((it) => it.str || '').join('\n');
         }
-        const t = text.replace(/\u00A0/g, " ");
+        const t = text.replace(/\u00A0/g, ' ');
 
-        // Pull values (possibly undefined if not found)
         const water = moneyFromTextAfterLabel(t, /\bWater\b/);
         const sewer = moneyFromTextAfterLabel(t, /\bSewer\b/);
         const storm1 = moneyFromTextAfterLabel(t, /Stormwater\s*(?:Total)?/);
@@ -229,7 +230,8 @@
         const superfund = moneyFromTextAfterLabel(t, /Portland\s*Harbor\s*Superfund/);
 
         const dateAfter = (label) => {
-          const m = t.match(new RegExp(label.source + `[\"\\s:]*([^\n\r]+)`, "i"));
+          const pattern = new RegExp(label.source + String.raw`[\"\s:]*([^\n\r]+)`, 'i');
+          const m = t.match(pattern);
           return m ? parseUsDate(m[1].trim()) : undefined;
         };
         const billingStart = dateAfter(/Billing\s*Start/);
@@ -316,16 +318,16 @@
       const totalUsage = Array.from(usageByUnit.values()).reduce((a, b) => a + b, 0);
       const nUnits = units.length || 1;
 
-      // Work strictly in cents for penny perfection
+      // Cents helpers
       const cents = (n) => Math.round((Number(n) || 0) * 100);
       const fromCents = (c) => Number((c / 100).toFixed(2));
 
       const categories = [
-        { key: "water", type: "usage", label: "Water" },
-        { key: "sewer", type: "usage", label: "Sewer" },
-        { key: "stormwater", type: "flat", label: "Stormwater" },
-        { key: "base", type: "flat", label: "Base Charge" },
-        { key: "superfund", type: "flat", label: "Portland Harbor Superfund" },
+        { key: 'water', type: 'usage', label: 'Water' },
+        { key: 'sewer', type: 'usage', label: 'Sewer' },
+        { key: 'stormwater', type: 'flat', label: 'Stormwater' },
+        { key: 'base', type: 'flat', label: 'Base Charge' },
+        { key: 'superfund', type: 'flat', label: 'Portland Harbor Superfund' },
       ];
 
       const perUnit = {};
@@ -336,19 +338,18 @@
           Water: 0,
           Sewer: 0,
           Stormwater: 0,
-          "Base Charge": 0,
-          "Portland Harbor Superfund": 0,
+          'Base Charge': 0,
+          'Portland Harbor Superfund': 0,
         };
       });
 
       categories.forEach((cat) => {
-        const total = bill.totals[cat.key] ?? 0; // treat missing as 0 for math
+        const total = bill.totals[cat.key] ?? 0;
         const totalC = cents(total);
         if (totalC === 0) return;
 
-        if (cat.type === "usage") {
+        if (cat.type === 'usage') {
           if (totalUsage === 0) {
-            // no usage -> equal split
             const baseC = Math.floor(totalC / nUnits);
             let remainder = totalC - baseC * nUnits;
             units.forEach((u, i) => {
@@ -363,7 +364,6 @@
             });
             let assigned = prelim.reduce((a, [, , c]) => a + c, 0);
             let remainder = totalC - assigned;
-            // distribute remaining cents by highest usage first, then by unit order
             prelim.sort((a, b) => b[1] - a[1] || byNumericUnitOrder(a[0], b[0]));
             let idx = 0;
             while (remainder > 0) {
@@ -372,13 +372,11 @@
               remainder--;
               idx++;
             }
-            // add base shares after distributing pennies (order doesn't matter for totals)
             prelim.forEach(([u, , c]) => {
               perUnit[u][cat.label] += c;
             });
           }
         } else {
-          // flat categories split equally, remainder by sorted unit order
           const baseC = Math.floor(totalC / nUnits);
           let remainder = totalC - baseC * nUnits;
           units.forEach((u, i) => {
@@ -393,21 +391,13 @@
         const r = {
           Unit: u,
           Usage: row.usage,
-          Water: fromCents(row["Water"]),
-          Sewer: fromCents(row["Sewer"]),
-          Stormwater: fromCents(row["Stormwater"]),
-          "Base Charge": fromCents(row["Base Charge"]),
-          "Portland Harbor Superfund": fromCents(row["Portland Harbor Superfund"]),
+          Water: fromCents(row['Water']),
+          Sewer: fromCents(row['Sewer']),
+          Stormwater: fromCents(row['Stormwater']),
+          'Base Charge': fromCents(row['Base Charge']),
+          'Portland Harbor Superfund': fromCents(row['Portland Harbor Superfund']),
         };
-        r.Total = Number(
-          (
-            r.Water +
-            r.Sewer +
-            r.Stormwater +
-            r["Base Charge"] +
-            r["Portland Harbor Superfund"]
-          ).toFixed(2)
-        );
+        r.Total = Number((r.Water + r.Sewer + r.Stormwater + r['Base Charge'] + r['Portland Harbor Superfund']).toFixed(2));
         return r;
       });
 
@@ -417,57 +407,39 @@
           acc.Water += r.Water;
           acc.Sewer += r.Sewer;
           acc.Stormwater += r.Stormwater;
-          acc["Base Charge"] += r["Base Charge"];
-          acc["Portland Harbor Superfund"] += r["Portland Harbor Superfund"];
+          acc['Base Charge'] += r['Base Charge'];
+          acc['Portland Harbor Superfund'] += r['Portland Harbor Superfund'];
           acc.Total += r.Total;
           return acc;
         },
-        {
-          Unit: "TOTALS",
-          Usage: 0,
-          Water: 0,
-          Sewer: 0,
-          Stormwater: 0,
-          "Base Charge": 0,
-          "Portland Harbor Superfund": 0,
-          Total: 0,
-        }
+        { Unit: 'TOTALS', Usage: 0, Water: 0, Sewer: 0, Stormwater: 0, 'Base Charge': 0, 'Portland Harbor Superfund': 0, Total: 0 }
       );
       return { rows, totalsRow, unitToAccount };
     }
 
     function buildWorkbooks({ bill, alloc, chargeName }) {
-      const fmt = (d) => (d ? d.toLocaleDateString() : "");
+      const fmt = (d) => (d ? d.toLocaleDateString() : '');
       const preparedOn = new Date();
       const summaryData = [
-        ["Billing Start", fmt(bill.billingStart)],
-        ["Billing End", fmt(bill.billingEnd)],
-        ["Bill Date", fmt(bill.billDate)],
-        ["Due Date", fmt(bill.dueDate)],
-        ["Water (usage)", bill.totals.water ?? 0],
-        ["Sewer (usage)", bill.totals.sewer ?? 0],
-        ["Stormwater (flat)", bill.totals.stormwater ?? 0],
-        ["Base (flat)", bill.totals.base ?? 0],
-        ["Portland Harbor Superfund (flat)", bill.totals.superfund ?? 0],
-        ["Prepared On", preparedOn.toLocaleString()],
-        ["Notes", "Usage-based = proportional by unit usage; Flat = equal per unit; Penny reconciliation: usage cats by high‑usage first; flat by unit order."],
+        ['Billing Start', fmt(bill.billingStart)],
+        ['Billing End', fmt(bill.billingEnd)],
+        ['Bill Date', fmt(bill.billDate)],
+        ['Due Date', fmt(bill.dueDate)],
+        ['Water (usage)', bill.totals.water ?? 0],
+        ['Sewer (usage)', bill.totals.sewer ?? 0],
+        ['Stormwater (flat)', bill.totals.stormwater ?? 0],
+        ['Base (flat)', bill.totals.base ?? 0],
+        ['Portland Harbor Superfund (flat)', bill.totals.superfund ?? 0],
+        ['Prepared On', preparedOn.toLocaleString()],
+        ['Notes', 'Usage-based = proportional by unit usage; Flat = equal per unit; Penny reconciliation: usage cats by high‑usage first; flat by unit order.'],
       ];
-      const allocHeader = [
-        "Unit",
-        "Usage",
-        "Water",
-        "Sewer",
-        "Stormwater",
-        "Base Charge",
-        "Portland Harbor Superfund",
-        "Total",
-      ];
+      const allocHeader = ['Unit','Usage','Water','Sewer','Stormwater','Base Charge','Portland Harbor Superfund','Total'];
 
       const importDate = toStartOfNextMonth(bill.billingEnd || bill.billDate || new Date());
-      const description = `${bill.billingStart?.toLocaleDateString() || ""} to ${bill.billingEnd?.toLocaleDateString() || ""}`;
-      const importHeader = ["account", "charge", "amount", "date", "description"];
+      const description = `${bill.billingStart?.toLocaleDateString() || ''} to ${bill.billingEnd?.toLocaleDateString() || ''}`;
+      const importHeader = ['account','charge','amount','date','description'];
       const importRows = alloc.rows.map((r) => [
-        alloc.unitToAccount.get(r.Unit) || "",
+        alloc.unitToAccount.get(r.Unit) || '',
         chargeName,
         Number(r.Total.toFixed(2)),
         importDate.toISOString().substring(0, 10),
@@ -475,65 +447,60 @@
       ]);
 
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryData), "Summary");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryData), 'Summary');
       XLSX.utils.book_append_sheet(
         wb,
         XLSX.utils.aoa_to_sheet([
           allocHeader,
           ...alloc.rows.map((r) => allocHeader.map((h) => r[h])),
-          allocHeader.map((h) => alloc.totalsRow[h] ?? (h === "Unit" ? "TOTALS" : 0)),
+          allocHeader.map((h) => alloc.totalsRow[h] ?? (h === 'Unit' ? 'TOTALS' : 0)),
         ]),
-        "Allocations"
+        'Allocations'
       );
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["account","charge","amount","date","description"], ...importRows]), "Import");
-      const fullXlsx = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([importHeader, ...importRows]), 'Import');
+      const fullXlsx = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
 
       const wbImp = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wbImp, XLSX.utils.aoa_to_sheet([["account","charge","amount","date","description"], ...importRows]), "Import");
-      const importXlsx = XLSX.write(wbImp, { type: "array", bookType: "xlsx" });
+      XLSX.utils.book_append_sheet(wbImp, XLSX.utils.aoa_to_sheet([importHeader, ...importRows]), 'Import');
+      const importXlsx = XLSX.write(wbImp, { type: 'array', bookType: 'xlsx' });
 
-      const csv = Papa.unparse([["account","charge","amount","date","description"], ...importRows]);
+      const csv = Papa.unparse([importHeader, ...importRows]);
 
       return { fullXlsx, importXlsx, importCsv: csv };
     }
 
-    function setMessage(t) {
-      msg.textContent = t || "";
-    }
-    function clearDownloads() {
-      downloads.innerHTML = "";
-    }
+    function setMessage(t) { msg.textContent = t || ''; }
+    function clearDownloads() { downloads.innerHTML = ''; }
     function addDownload(label, blob, name) {
       const href = URL.createObjectURL(blob);
-      const a = document.createElement("a");
+      const a = document.createElement('a');
       a.href = href;
       a.download = name;
-      a.className = "flex items-center justify-between rounded-2xl border border-zinc-200 bg-white p-4 text-sm shadow-sm hover:shadow";
+      a.className = 'flex items-center justify-between rounded-2xl border border-zinc-200 bg-white p-4 text-sm shadow-sm hover:shadow';
       a.innerHTML = `<div class="flex items-center gap-3"><span class="text-teal-600">⬇</span><span>${label}</span></div><span class="text-xs text-zinc-400">${name}</span>`;
       downloads.appendChild(a);
     }
 
-    $("process").addEventListener("click", async () => {
+    document.getElementById('process').addEventListener('click', async () => {
       try {
-        setMessage("");
+        setMessage('');
         clearDownloads();
-        const billFile = $("bill").files[0];
-        const usageFile = $("usage").files[0];
-        const ownerFile = $("owner").files[0];
+        const billFile = document.getElementById('bill').files[0];
+        const usageFile = document.getElementById('usage').files[0];
+        const ownerFile = document.getElementById('owner').files[0];
         if (!billFile || !usageFile || !ownerFile) {
-          setMessage("Please add all three files: Bill PDF, Usage CSV, and Owner Export.");
+          setMessage('Please add all three files: Bill PDF, Usage CSV, and Owner Export.');
           return;
         }
-        setMessage("Processing…");
+        setMessage('Processing…');
 
         let bill = await parseBillPDF(billFile);
 
-        // === FIX 2: Only flag truly missing fields (undefined), not legit zeros ===
         const missing = [];
-        if (bill.billingStart === undefined) missing.push("Billing Start");
-        if (bill.billingEnd === undefined) missing.push("Billing End");
-        if (bill.billDate === undefined) missing.push("Bill Date");
-        if (bill.dueDate === undefined) missing.push("Due Date");
+        if (bill.billingStart === undefined) missing.push('Billing Start');
+        if (bill.billingEnd === undefined) missing.push('Billing End');
+        if (bill.billDate === undefined) missing.push('Bill Date');
+        if (bill.dueDate === undefined) missing.push('Due Date');
 
         const cats = bill.totals;
         const missingCats = Object.entries({
@@ -542,40 +509,34 @@
           Stormwater: cats.stormwater,
           Base: cats.base,
           Superfund: cats.superfund,
-        })
-          .filter(([, v]) => v === undefined)
-          .map(([k]) => k);
+        }).filter(([, v]) => v === undefined).map(([k]) => k);
 
         if (missing.length || missingCats.length)
-          setMessage(
-            `Missing items: ${[...missing, ...missingCats].join(
-              ", "
-            )}. You can fill them in the fields above, then click Process again.`
-          );
+          setMessage(`Missing items: ${[...missing, ...missingCats].join(', ')}. You can fill them in the fields above, then click Process again.`);
 
-        const val = (id) => (document.getElementById(id)?.value || "").trim();
+        const val = (id) => (document.getElementById(id)?.value || '').trim();
         const maybeDate = (id, prev) => {
           const v = val(id);
           return v ? new Date(v + 'T00:00:00') : prev;
         };
-        const parseMoney = (v) => Number(String(v).replace(/[^\d.-]/g, "")) || 0;
+        const parseMoney = (v) => Number(String(v).replace(/[^\d.-]/g, '')) || 0;
         const maybeMoney = (id, prev) => {
           const v = val(id);
-          return v !== "" ? parseMoney(v) : (prev ?? 0);
+          return v !== '' ? parseMoney(v) : (prev ?? 0);
         };
 
         bill = {
           ...bill,
-          billingStart: maybeDate("fix-billingStart", bill.billingStart),
-          billingEnd: maybeDate("fix-billingEnd", bill.billingEnd),
-          billDate: maybeDate("fix-billDate", bill.billDate),
-          dueDate: maybeDate("fix-dueDate", bill.dueDate),
+          billingStart: maybeDate('fix-billingStart', bill.billingStart),
+          billingEnd: maybeDate('fix-billingEnd', bill.billingEnd),
+          billDate: maybeDate('fix-billDate', bill.billDate),
+          dueDate: maybeDate('fix-dueDate', bill.dueDate),
           totals: {
-            water: maybeMoney("fix-water", bill.totals.water),
-            sewer: maybeMoney("fix-sewer", bill.totals.sewer),
-            stormwater: maybeMoney("fix-stormwater", bill.totals.stormwater),
-            base: maybeMoney("fix-base", bill.totals.base),
-            superfund: maybeMoney("fix-superfund", bill.totals.superfund),
+            water: maybeMoney('fix-water', bill.totals.water),
+            sewer: maybeMoney('fix-sewer', bill.totals.sewer),
+            stormwater: maybeMoney('fix-stormwater', bill.totals.stormwater),
+            base: maybeMoney('fix-base', bill.totals.base),
+            superfund: maybeMoney('fix-superfund', bill.totals.superfund),
           },
         };
 
@@ -583,36 +544,18 @@
         const ownerRows = parseOwnerExport(await fileToText(ownerFile));
 
         const alloc = allocate(bill, usageRows, ownerRows);
-        const chargeName = chargeNameInput.value || "Water Billing";
+        const chargeName = chargeNameInput.value || 'Water Billing';
         const { fullXlsx, importXlsx, importCsv } = buildWorkbooks({ bill, alloc, chargeName });
 
-        addDownload(
-          "Download Full Workbook (xlsx)",
-          new Blob([fullXlsx], {
-            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          }),
-          `MicroHOA_Allocation_${Date.now()}.xlsx`
-        );
-        addDownload(
-          "Download Import Only (xlsx)",
-          new Blob([importXlsx], {
-            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          }),
-          `MicroHOA_Import_${Date.now()}.xlsx`
-        );
-        addDownload(
-          "Download Import Only (csv)",
-          new Blob([importCsv], {
-            type: "text/csv",
-          }),
-          `MicroHOA_Import_${Date.now()}.csv`
-        );
+        addDownload('Download Full Workbook (xlsx)', new Blob([fullXlsx], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `MicroHOA_Allocation_${Date.now()}.xlsx`);
+        addDownload('Download Import Only (xlsx)', new Blob([importXlsx], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `MicroHOA_Import_${Date.now()}.xlsx`);
+        addDownload('Download Import Only (csv)', new Blob([importCsv], { type: 'text/csv' }), `MicroHOA_Import_${Date.now()}.csv`);
 
-        localStorage.setItem("mh_charge_name", chargeName);
-        setMessage("All set! Files are ready below.");
+        localStorage.setItem('mh_charge_name', chargeName);
+        setMessage('All set! Files are ready below.');
       } catch (e) {
         console.error(e);
-        setMessage("Something went wrong. Please check your files and try again.");
+        setMessage('Something went wrong. Please check your files and try again.');
       }
     });
   </script>
