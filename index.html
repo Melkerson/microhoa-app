@@ -69,7 +69,7 @@
         <div>
           <label for="owner" class="label">Owner Export (Account Map)</label>
           <input id="owner" type="file" accept=".csv,text/csv" class="input" />
-          <p class="help mt-1">Only <em>Unit</em> and <em>Account</em> are used. Address may be used to extract unit #.</p>
+          <p class="help mt-1">Use <em>Unit</em> (or Address) and <em>Account</em> (Acct, Account # also ok).</p>
         </div>
       </div>
 
@@ -127,7 +127,7 @@
     </div>
 
     <div class="mt-8 text-xs text-zinc-500">
-      <p><strong>How it works:</strong> I parse the bill PDF for dates &amp; category totals; read usage &amp; owner CSVs; allocate costs (usage proportional for Water/Sewer; equal split for Stormwater/Base/Superfund) with penny-perfect reconciliation (usage cats distribute remaining cents by highest usage first; flat by unit order). Then I export a full workbook and "Import-only" files.</p>
+      <p><strong>How it works:</strong> I parse the bill PDF for dates &amp; category totals; read usage &amp; owner CSVs; allocate costs (usage proportional for Water/Sewer; equal split for Stormwater/Base/Superfund) with penny-perfect reconciliation. Then I export a full workbook and "Import-only" files.</p>
     </div>
 
     <footer class="mt-12 border-t border-zinc-200 py-6 text-xs text-zinc-500">
@@ -184,26 +184,23 @@
       r.readAsText(f);
     });
 
-    const byNumericUnitOrder = (a, b) => {
-      const na = Number(String(a).replace(/\D/g, ""));
-      const nb = Number(String(b).replace(/\D/g, ""));
-      if (!isNaN(na) && !isNaN(nb)) return na - nb;
-      return String(a).localeCompare(String(b));
-    };
-    const streetNumber = (addr) => {
-      if (!addr) return;
-      const m = String(addr).match(/\b(\d{1,6})\b/);
-      return m ? m[1] : undefined;
-    };
-
-    // --- Robust regex helpers (Vercel-friendly) ---
+    // ---------- Robust parsing helpers ----------
+    // Find first money token (must include decimals) within same/next 3 lines after label
     const moneyFromTextAfterLabel = (t, label) => {
-      // Use String.raw to keep backslashes intact through any tooling
-      const pattern = new RegExp(label.source + String.raw`["\s:\-]*\$?\s*([\n\r\t\s$,\d.-]+)`, 'i');
-      const m = t.match(pattern);
-      if (!m) return undefined;
-      const n = Number(String(m[1]).replace(/[^\d.-]/g, ''));
-      return Number.isFinite(n) ? n : undefined;
+      const lines = t.split(/\r?\n/);
+      const lab = new RegExp(label.source, 'i');
+      for (let i = 0; i < lines.length; i++) {
+        if (lab.test(lines[i])) {
+          for (let j = 0; j < 4 && i + j < lines.length; j++) {
+            const m = lines[i + j].match(/\$?\s*([+\-]?\d{1,3}(?:,\d{3})*(?:\.\d{2})|[+\-]?\d+\.\d{2})\b/);
+            if (m) {
+              const n = Number(m[1].replace(/,/g, ''));
+              if (Number.isFinite(n)) return n;
+            }
+          }
+        }
+      }
+      return undefined;
     };
 
     async function parseBillPDF(file) {
@@ -223,15 +220,17 @@
         const water = moneyFromTextAfterLabel(t, /\bWater\b/);
         const sewer = moneyFromTextAfterLabel(t, /\bSewer\b/);
         const storm1 = moneyFromTextAfterLabel(t, /Stormwater\s*(?:Total)?/);
-        const billableArea = moneyFromTextAfterLabel(t, /Billable\s*Area/);
-        const serviceUnit = moneyFromTextAfterLabel(t, /Service\s*Unit/);
+        // More specific component labels first
+        const billableArea = moneyFromTextAfterLabel(t, /Stormwater\s*Billable\s*Area/)
+                           ?? moneyFromTextAfterLabel(t, /Billable\s*Area/);
+        const serviceUnit  = moneyFromTextAfterLabel(t, /Stormwater\s*Service\s*Unit/)
+                           ?? moneyFromTextAfterLabel(t, /Service\s*Unit/);
         const stormwater = (storm1 ?? 0) || ((billableArea ?? 0) + (serviceUnit ?? 0)) || undefined;
         const base = moneyFromTextAfterLabel(t, /Base(\s*Charge)?/);
         const superfund = moneyFromTextAfterLabel(t, /Portland\s*Harbor\s*Superfund/);
 
         const dateAfter = (label) => {
-          const pattern = new RegExp(label.source + String.raw`[\"\s:]*([^\n\r]+)`, 'i');
-          const m = t.match(pattern);
+          const m = t.match(new RegExp(label.source + String.raw`["\s:]*([^\n\r]+)`, 'i'));
           return m ? parseUsDate(m[1].trim()) : undefined;
         };
         const billingStart = dateAfter(/Billing\s*Start/);
@@ -257,21 +256,12 @@
       const { data, meta } = Papa.parse(text, { header: true, skipEmptyLines: true });
       const rows = data;
       const headers = (meta.fields || []).map((h) => String(h || ""));
-      const unitCol =
-        headers.find((h) => /^(unit|unit_no|unit number|unit#)$/i.test(h)) ||
-        headers.find((h) => /unit/i.test(h)) ||
-        headers[0];
-      const usageCol =
-        headers.find((h) => /^(meter\s*usage|usage|consumption|ccf|gallons)$/i.test(h)) ||
-        headers.find((h) => /usage|consumption|ccf|gallon/i.test(h)) ||
-        headers[1];
+      const unitCol = headers.find((h) => /^(unit|unit[_\s-]?no|unit[#\s-]?number)$/i.test(h)) || headers.find((h) => /unit/i.test(h)) || headers[0];
+      const usageCol = headers.find((h) => /^(meter\s*usage|usage|consumption|ccf|gallons)$/i.test(h)) || headers.find((h) => /usage|consumption|ccf|gallon/i.test(h)) || headers[1];
       return rows
         .map((r) => ({
           unit: String(r[unitCol] ?? "").trim(),
-          usage:
-            String(r[usageCol] ?? "").trim() === ""
-              ? 0
-              : Number(String(r[usageCol]).replace(/[^\d.\-]/g, "")) || 0,
+          usage: String(r[usageCol] ?? "").trim() === "" ? 0 : Number(String(r[usageCol]).replace(/[^\d.\-]/g, "")) || 0,
         }))
         .filter((r) => r.unit !== "");
     }
@@ -280,45 +270,60 @@
       const { data, meta } = Papa.parse(text, { header: true, skipEmptyLines: true });
       const rows = data;
       const headers = (meta.fields || []).map((h) => String(h || ""));
-      const unitCol =
-        headers.find((h) => /^(unit|unit_no|unit number|unit#)$/i.test(h)) ||
-        headers.find((h) => /unit/i.test(h));
-      const accountCol =
-        headers.find((h) => /^account$/i.test(h)) || headers.find((h) => /account/i.test(h));
-      const addressCol =
-        headers.find((h) => /^address$/i.test(h)) || headers.find((h) => /address/i.test(h));
+      const pickCol = (alts) => headers.find(h => alts.some(rx => rx.test(h)));
+
+      const unitCol = pickCol([/^(unit|unit[_\s-]?no|unit[#\s-]?number)$/i, /unit/i]);
+      const accountCol = pickCol([/^(account|account\s*#|account\s*number)$/i, /^(acct|acct\s*#)$/i, /account/i, /acct/i]);
+      const addressCol = pickCol([/^address$/i, /address/i]);
+
       return rows.map((r) => ({
-        unit: r[unitCol] ? String(r[unitCol]).trim() : undefined,
-        account: r[accountCol] ? String(r[accountCol]).trim() : undefined,
-        address: r[addressCol] ? String(r[addressCol]).trim() : undefined,
+        unit: unitCol ? String(r[unitCol]).trim() : undefined,
+        account: accountCol ? String(r[accountCol]).trim() : undefined,
+        address: addressCol ? String(r[addressCol]).trim() : undefined,
       }));
     }
 
+    // ---------- Allocation ----------
+    const normNum = (s) => (String(s).match(/\d+/)?.[0] ?? "").replace(/^0+/, "");
+    const normTxt = (s) => String(s || "").trim().toUpperCase();
+    const byNumericUnitOrder = (a, b) => {
+      const na = Number(String(a).replace(/\D/g, ""));
+      const nb = Number(String(b).replace(/\D/g, ""));
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
+      return String(a).localeCompare(String(b));
+    };
+
     function allocate(bill, usageRows, ownerRows) {
-      const normUnit = (u) => {
-        const n = String(u).match(/\d+/)?.[0];
-        return n ? n : String(u).trim();
-      };
       const unitsSet = new Set();
-      usageRows.forEach((r) => unitsSet.add(normUnit(r.unit)));
+      const usageByKey = new Map();
+
+      // collect usage keys (prefer numeric key if present)
+      usageRows.forEach(({ unit, usage }) => {
+        const kNum = normNum(unit);
+        const kTxt = normTxt(unit);
+        const key = kNum || kTxt;
+        unitsSet.add(key);
+        usageByKey.set(key, (usageByKey.get(key) || 0) + (isFinite(usage) ? usage : 0));
+      });
+
+      // map unit -> account using both numeric and text keys
       const unitToAccount = new Map();
       ownerRows.forEach((row) => {
-        const u = row.unit
-          ? normUnit(row.unit)
-          : streetNumber(row.address) ?? undefined;
-        if (!u) return;
-        if (row.account) unitToAccount.set(u, row.account);
+        const src = row.unit || row.address;
+        if (!src) return;
+        const kNum = normNum(src);
+        const kTxt = normTxt(src);
+        if (row.account) {
+          if (kNum) unitToAccount.set(kNum, row.account);
+          unitToAccount.set(kTxt, row.account);
+        }
       });
+
       const units = Array.from(unitsSet).sort(byNumericUnitOrder);
-      const usageByUnit = new Map();
-      usageRows.forEach(({ unit, usage }) => {
-        const key = normUnit(unit);
-        usageByUnit.set(key, (usageByUnit.get(key) || 0) + (isFinite(usage) ? usage : 0));
-      });
-      const totalUsage = Array.from(usageByUnit.values()).reduce((a, b) => a + b, 0);
+      const totalUsage = Array.from(usageByKey.values()).reduce((a, b) => a + b, 0);
       const nUnits = units.length || 1;
 
-      // Cents helpers
+      // cents helpers
       const cents = (n) => Math.round((Number(n) || 0) * 100);
       const fromCents = (c) => Number((c / 100).toFixed(2));
 
@@ -334,7 +339,7 @@
       units.forEach((u) => {
         perUnit[u] = {
           unit: u,
-          usage: usageByUnit.get(u) || 0,
+          usage: usageByKey.get(u) || 0,
           Water: 0,
           Sewer: 0,
           Stormwater: 0,
@@ -352,13 +357,10 @@
           if (totalUsage === 0) {
             const baseC = Math.floor(totalC / nUnits);
             let remainder = totalC - baseC * nUnits;
-            units.forEach((u, i) => {
-              const add = i < remainder ? 1 : 0;
-              perUnit[u][cat.label] += baseC + add;
-            });
+            units.forEach((u, i) => { perUnit[u][cat.label] += baseC + (i < remainder ? 1 : 0); });
           } else {
             const prelim = units.map((u) => {
-              const uUsage = usageByUnit.get(u) || 0;
+              const uUsage = usageByKey.get(u) || 0;
               const share = Math.floor((uUsage / totalUsage) * totalC);
               return [u, uUsage, share];
             });
@@ -367,22 +369,15 @@
             prelim.sort((a, b) => b[1] - a[1] || byNumericUnitOrder(a[0], b[0]));
             let idx = 0;
             while (remainder > 0) {
-              const [u] = prelim[idx % prelim.length];
-              perUnit[u][cat.label] += 1;
-              remainder--;
-              idx++;
+              perUnit[prelim[idx % prelim.length][0]][cat.label] += 1;
+              remainder--; idx++;
             }
-            prelim.forEach(([u, , c]) => {
-              perUnit[u][cat.label] += c;
-            });
+            prelim.forEach(([u, , c]) => { perUnit[u][cat.label] += c; });
           }
         } else {
           const baseC = Math.floor(totalC / nUnits);
           let remainder = totalC - baseC * nUnits;
-          units.forEach((u, i) => {
-            const add = i < remainder ? 1 : 0;
-            perUnit[u][cat.label] += baseC + add;
-          });
+          units.forEach((u, i) => { perUnit[u][cat.label] += baseC + (i < remainder ? 1 : 0); });
         }
       });
 
@@ -401,19 +396,17 @@
         return r;
       });
 
-      const totalsRow = rows.reduce(
-        (acc, r) => {
-          acc.Usage += r.Usage;
-          acc.Water += r.Water;
-          acc.Sewer += r.Sewer;
-          acc.Stormwater += r.Stormwater;
-          acc['Base Charge'] += r['Base Charge'];
-          acc['Portland Harbor Superfund'] += r['Portland Harbor Superfund'];
-          acc.Total += r.Total;
-          return acc;
-        },
-        { Unit: 'TOTALS', Usage: 0, Water: 0, Sewer: 0, Stormwater: 0, 'Base Charge': 0, 'Portland Harbor Superfund': 0, Total: 0 }
-      );
+      const totalsRow = rows.reduce((acc, r) => {
+        acc.Usage += r.Usage;
+        acc.Water += r.Water;
+        acc.Sewer += r.Sewer;
+        acc.Stormwater += r.Stormwater;
+        acc['Base Charge'] += r['Base Charge'];
+        acc['Portland Harbor Superfund'] += r['Portland Harbor Superfund'];
+        acc.Total += r.Total;
+        return acc;
+      }, { Unit: 'TOTALS', Usage: 0, Water: 0, Sewer: 0, Stormwater: 0, 'Base Charge': 0, 'Portland Harbor Superfund': 0, Total: 0 });
+
       return { rows, totalsRow, unitToAccount };
     }
 
@@ -425,21 +418,24 @@
         ['Billing End', fmt(bill.billingEnd)],
         ['Bill Date', fmt(bill.billDate)],
         ['Due Date', fmt(bill.dueDate)],
-        ['Water (usage)', bill.totals.water ?? 0],
-        ['Sewer (usage)', bill.totals.sewer ?? 0],
-        ['Stormwater (flat)', bill.totals.stormwater ?? 0],
-        ['Base (flat)', bill.totals.base ?? 0],
-        ['Portland Harbor Superfund (flat)', bill.totals.superfund ?? 0],
+        ['Water (usage)', Number(bill.totals.water ?? 0).toFixed(2)],
+        ['Sewer (usage)', Number(bill.totals.sewer ?? 0).toFixed(2)],
+        ['Stormwater (flat)', Number(bill.totals.stormwater ?? 0).toFixed(2)],
+        ['Base (flat)', Number(bill.totals.base ?? 0).toFixed(2)],
+        ['Portland Harbor Superfund (flat)', Number(bill.totals.superfund ?? 0).toFixed(2)],
         ['Prepared On', preparedOn.toLocaleString()],
         ['Notes', 'Usage-based = proportional by unit usage; Flat = equal per unit; Penny reconciliation: usage cats by high‑usage first; flat by unit order.'],
       ];
+
       const allocHeader = ['Unit','Usage','Water','Sewer','Stormwater','Base Charge','Portland Harbor Superfund','Total'];
 
       const importDate = toStartOfNextMonth(bill.billingEnd || bill.billDate || new Date());
       const description = `${bill.billingStart?.toLocaleDateString() || ''} to ${bill.billingEnd?.toLocaleDateString() || ''}`;
       const importHeader = ['account','charge','amount','date','description'];
+
+      const acctFor = (map, u) => map.get(u) || map.get(String(u).toUpperCase()) || '';
       const importRows = alloc.rows.map((r) => [
-        alloc.unitToAccount.get(r.Unit) || '',
+        acctFor(alloc.unitToAccount, r.Unit),
         chargeName,
         Number(r.Total.toFixed(2)),
         importDate.toISOString().substring(0, 10),
@@ -469,6 +465,7 @@
       return { fullXlsx, importXlsx, importCsv: csv };
     }
 
+    // ---------- UI helpers ----------
     function setMessage(t) { msg.textContent = t || ''; }
     function clearDownloads() { downloads.innerHTML = ''; }
     function addDownload(label, blob, name) {
@@ -512,38 +509,41 @@
         }).filter(([, v]) => v === undefined).map(([k]) => k);
 
         if (missing.length || missingCats.length)
-          setMessage(`Missing items: ${[...missing, ...missingCats].join(', ')}. You can fill them in the fields above, then click Process again.`);
+          setMessage(`Missing items: ${[...missing, ...missingCats].join(', ')}. You can fill them in above, then click Process again.`);
 
         const val = (id) => (document.getElementById(id)?.value || '').trim();
-        const maybeDate = (id, prev) => {
-          const v = val(id);
-          return v ? new Date(v + 'T00:00:00') : prev;
-        };
+        const maybeDate = (id, prev) => { const v = val(id); return v ? new Date(v + 'T00:00:00') : prev; };
         const parseMoney = (v) => Number(String(v).replace(/[^\d.-]/g, '')) || 0;
-        const maybeMoney = (id, prev) => {
-          const v = val(id);
-          return v !== '' ? parseMoney(v) : (prev ?? 0);
-        };
+        const maybeMoney = (id, prev) => { const v = val(id); return v !== '' ? parseMoney(v) : (prev ?? 0); };
 
         bill = {
           ...bill,
           billingStart: maybeDate('fix-billingStart', bill.billingStart),
-          billingEnd: maybeDate('fix-billingEnd', bill.billingEnd),
-          billDate: maybeDate('fix-billDate', bill.billDate),
-          dueDate: maybeDate('fix-dueDate', bill.dueDate),
+          billingEnd:   maybeDate('fix-billingEnd',   bill.billingEnd),
+          billDate:     maybeDate('fix-billDate',     bill.billDate),
+          dueDate:      maybeDate('fix-dueDate',      bill.dueDate),
           totals: {
-            water: maybeMoney('fix-water', bill.totals.water),
-            sewer: maybeMoney('fix-sewer', bill.totals.sewer),
+            water:      maybeMoney('fix-water',      bill.totals.water),
+            sewer:      maybeMoney('fix-sewer',      bill.totals.sewer),
             stormwater: maybeMoney('fix-stormwater', bill.totals.stormwater),
-            base: maybeMoney('fix-base', bill.totals.base),
-            superfund: maybeMoney('fix-superfund', bill.totals.superfund),
+            base:       maybeMoney('fix-base',       bill.totals.base),
+            superfund:  maybeMoney('fix-superfund',  bill.totals.superfund),
           },
         };
 
         const usageRows = parseUsageCSV(await fileToText(usageFile));
         const ownerRows = parseOwnerExport(await fileToText(ownerFile));
-
         const alloc = allocate(bill, usageRows, ownerRows);
+
+        // Debug strip for instant insight
+        const dbg = [];
+        const sumUsage = alloc.rows.reduce((s,r)=>s+(Number(r.Usage)||0),0);
+        dbg.push(`Units: ${alloc.rows.length}`);
+        dbg.push(`Total usage: ${sumUsage}`);
+        dbg.push(`Cats $: ${['water','sewer','stormwater','base','superfund'].map(k => (bill.totals[k]??0).toFixed(2)).join(' / ')}`);
+        dbg.push(`Accounts mapped: ${alloc.unitToAccount.size}`);
+        setMessage(dbg.join('  |  '));
+
         const chargeName = chargeNameInput.value || 'Water Billing';
         const { fullXlsx, importXlsx, importCsv } = buildWorkbooks({ bill, alloc, chargeName });
 
@@ -552,7 +552,6 @@
         addDownload('Download Import Only (csv)', new Blob([importCsv], { type: 'text/csv' }), `MicroHOA_Import_${Date.now()}.csv`);
 
         localStorage.setItem('mh_charge_name', chargeName);
-        setMessage('All set! Files are ready below.');
       } catch (e) {
         console.error(e);
         setMessage('Something went wrong. Please check your files and try again.');
